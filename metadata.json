@@ -1,0 +1,6 @@
+{
+  "name": "Shads AI",
+  "description": "An advanced forex trading chart scanner and institutional order flow analyzer utilizing ICT concepts, Smart Money Concepts (SMC), and Price Action.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

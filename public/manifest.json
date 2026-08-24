@@ -1,0 +1,56 @@
+{
+  "short_name": "Shads AI",
+  "name": "Shads AI Forex Chart Scanner",
+  "description": "Premium institutional Forex chart scanning tool powered by AI with SMC and ICT analysis.",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "maskable"
+    }
+  ],
+  "start_url": "/",
+  "id": "/",
+  "scope": "/",
+  "background_color": "#040811",
+  "theme_color": "#040811",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false,
+  "categories": ["finance", "utilities"],
+  "screenshots": [
+    {
+      "src": "/pwa_mobile.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpeg",
+      "form_factor": "narrow",
+      "label": "Shads AI Mobile SMC Analytics Tool"
+    },
+    {
+      "src": "/pwa_desktop.jpg",
+      "sizes": "1920x1080",
+      "type": "image/jpeg",
+      "form_factor": "wide",
+      "label": "Shads AI Institutional Multi-Chart Hub"
+    }
+  ]
+}
