@@ -1,7 +1,7 @@
 {
   "short_name": "Shads AI",
   "name": "Shads AI Forex Chart Scanner",
-  "description": "Premium institutional Forex chart scanning tool powered by AI with SMC and ICT analysis.",
+  "description": "Institutional Forex & Crypto chart scanning tool powered by AI with SMC and ICT analysis.",
   "icons": [
     {
       "src": "/icon.png",
@@ -31,9 +31,10 @@
   "start_url": "/",
   "id": "/",
   "scope": "/",
-  "background_color": "#040811",
-  "theme_color": "#040811",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "window-controls-overlay"],
   "orientation": "portrait-primary",
   "prefer_related_applications": false,
   "categories": ["finance", "utilities"],

@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
@@ -166,28 +167,68 @@ async function startServer() {
     res.json({ status: "ok", timestamp: Date.now() });
   });
 
+  // Explicit handler for Service Worker and Web Manifest
+  app.get("/sw.js", (req, res) => {
+    const swPath = path.resolve(process.cwd(), "public", "sw.js");
+    res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+    res.setHeader("Service-Worker-Allowed", "/");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.sendFile(swPath);
+  });
+
+  app.get("/manifest.json", (req, res) => {
+    const manifestPath = path.resolve(process.cwd(), "public", "manifest.json");
+    res.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
+    res.sendFile(manifestPath);
+  });
+
   // Serve the precompiled Android APK with strict path traversal checks
   app.get(
-    ["/shads_ai.apk", "/api/download-apk"],
-    createRateLimiter(20, 60 * 1000, "apk-download"),
+    [
+      "/ShadsAI_v1.0.apk",
+      "/ShadsAI.apk",
+      "/shads_ai.apk",
+      "/app-debug.apk",
+      "/app-release.apk",
+      "/api/download-apk",
+    ],
+    createRateLimiter(100, 60 * 1000, "apk-download"),
     (req, res) => {
-      const publicDir = path.resolve(process.cwd(), "public");
-      const apkPath = path.resolve(publicDir, "shads_ai.apk");
+      const candidates = [
+        path.resolve(process.cwd(), "APK_DOWNLOAD", "ShadsAI_v1.0.apk"),
+        path.resolve(process.cwd(), "APK_DOWNLOAD", "app-release.apk"),
+        path.resolve(process.cwd(), "APK_DOWNLOAD", "app-debug.apk"),
+        path.resolve(process.cwd(), "apk", "ShadsAI_v1.0.apk"),
+        path.resolve(process.cwd(), ".build-outputs", "ShadsAI_v1.0.apk"),
+        path.resolve(process.cwd(), ".build-outputs", "app-debug.apk"),
+        path.resolve(process.cwd(), "public", "ShadsAI_v1.0.apk"),
+        path.resolve(process.cwd(), "public", "app-debug.apk"),
+        path.resolve(process.cwd(), "public", "shads_ai.apk"),
+        path.resolve(process.cwd(), "ShadsAI_v1.0.apk"),
+      ];
 
-      // Security check: ensure path does not escape public directory
-      if (!apkPath.startsWith(publicDir)) {
-        return res.status(403).json({ error: "Access denied." });
+      const foundPath = candidates.find((p) => fs.existsSync(p));
+
+      if (!foundPath) {
+        return res.status(404).json({ error: "APK file not found on server." });
       }
 
-      res.setHeader("Content-Type", "application/vnd.android.package-archive");
-      res.setHeader("Content-Disposition", 'attachment; filename="shads_ai.apk"');
-      res.sendFile(apkPath, (err) => {
-        if (err) {
-          if (!res.headersSent) {
-            res.status(404).send("APK file not found on server. Please package or generate one.");
-          }
+      try {
+        const stat = fs.statSync(foundPath);
+        res.writeHead(200, {
+          "Content-Type": "application/vnd.android.package-archive",
+          "Content-Disposition": 'attachment; filename="ShadsAI_v1.0.apk"',
+          "Content-Length": stat.size,
+          "Cache-Control": "no-cache"
+        });
+        const readStream = fs.createReadStream(foundPath);
+        readStream.pipe(res);
+      } catch (err: any) {
+        console.error("[APK Delivery Error]:", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Error delivering APK file." });
         }
-      });
+      }
     }
   );
 
