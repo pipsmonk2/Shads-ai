@@ -1,0 +1,66 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK via Capacitor & Gradle
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Android icons and splash
+        run: node scripts/generate_android_icons.cjs
+
+      - name: Build Web Application
+        run: npm run build:client
+
+      - name: Sync Capacitor Android Project
+        run: npx cap sync android
+
+      - name: Grant execute permission for Gradle Wrapper
+        run: chmod +x android/gradlew
+
+      - name: Build Debug APK with Gradle
+        run: |
+          cd android
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Verify Built APK exists
+        run: |
+          ls -la android/app/build/outputs/apk/debug/
+          test -f android/app/build/outputs/apk/debug/app-debug.apk || exit 1
+          echo "APK Build Success! Size: $(stat -c%s android/app/build/outputs/apk/debug/app-debug.apk) bytes"
+
+      - name: Upload Debug APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShadsAI-Debug-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30

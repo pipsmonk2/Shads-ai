@@ -528,6 +528,8 @@ async function buildFullApk() {
     'apk/app-release.apk',
     '.build-outputs/ShadsAI_v1.0.apk',
     '.build-outputs/app-debug.apk',
+    'android/app/build/outputs/apk/debug/app-debug.apk',
+    'android/app/build/outputs/apk/release/app-release.apk',
     'public/ShadsAI_v1.0.apk',
     'public/ShadsAI.apk',
     'public/app-debug.apk',
@@ -536,6 +538,10 @@ async function buildFullApk() {
   ];
 
   for (const outPath of outputPaths) {
+    const parentDir = path.dirname(outPath);
+    if (!fs.existsSync(parentDir)) {
+      fs.mkdirSync(parentDir, { recursive: true });
+    }
     fs.writeFileSync(outPath, signedApkBuffer);
   }
 
