@@ -195,16 +195,10 @@ async function startServer() {
     createRateLimiter(100, 60 * 1000, "apk-download"),
     (req, res) => {
       const candidates = [
-        path.resolve(process.cwd(), "APK_DOWNLOAD", "ShadsAI_v1.0.apk"),
-        path.resolve(process.cwd(), "APK_DOWNLOAD", "app-release.apk"),
-        path.resolve(process.cwd(), "APK_DOWNLOAD", "app-debug.apk"),
-        path.resolve(process.cwd(), "apk", "ShadsAI_v1.0.apk"),
-        path.resolve(process.cwd(), ".build-outputs", "ShadsAI_v1.0.apk"),
-        path.resolve(process.cwd(), ".build-outputs", "app-debug.apk"),
-        path.resolve(process.cwd(), "public", "ShadsAI_v1.0.apk"),
+        path.resolve(process.cwd(), "android", "app", "build", "outputs", "apk", "debug", "app-debug.apk"),
+        path.resolve(process.cwd(), "android", "app", "build", "outputs", "apk", "release", "app-release.apk"),
         path.resolve(process.cwd(), "public", "app-debug.apk"),
-        path.resolve(process.cwd(), "public", "shads_ai.apk"),
-        path.resolve(process.cwd(), "ShadsAI_v1.0.apk"),
+        path.resolve(process.cwd(), "public", "ShadsAI_v1.0.apk"),
       ];
 
       const foundPath = candidates.find((p) => fs.existsSync(p));
