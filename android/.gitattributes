@@ -1,0 +1,14 @@
+# Binary files - prevent any line-ending normalization or text transformations
+*.jar binary
+*.aar binary
+*.so binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.apk binary
+*.aab binary
+
+# Ensure gradlew has unix line endings
+gradlew text eol=lf
+*.bat text eol=crlf

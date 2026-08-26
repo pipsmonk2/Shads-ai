@@ -1,0 +1,20 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Binary files - prevent any line-ending normalization or text transformations
+*.jar binary
+*.aar binary
+*.so binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.apk binary
+*.aab binary
+
+# Shell scripts and Gradle wrapper must have LF line endings
+*.sh text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
