@@ -49,8 +49,11 @@ jobs:
       - name: Sync Capacitor Android Project
         run: npx cap sync android
 
-      - name: Grant execute permission for Gradle Wrapper
-        run: chmod +x android/gradlew
+      - name: Generate fresh Gradle Wrapper
+        run: |
+          cd android
+          gradle wrapper --gradle-version 8.9
+          chmod +x gradlew
 
       - name: Build Debug APK with Gradle
         run: |
