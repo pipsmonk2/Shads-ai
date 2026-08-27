@@ -149,11 +149,31 @@ async function startServer() {
   // Security: Disable X-Powered-By to prevent technology fingerprinting
   app.disable("x-powered-by");
 
-  // Security: Standard HTTP Security Headers Middleware & CORS
+  // Security: Standard HTTP Security Headers Middleware & Comprehensive CORS
   app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept");
+    const origin = req.headers.origin;
+    const allowedOrigins = [
+      "capacitor://localhost",
+      "https://localhost",
+      "http://localhost",
+      "http://localhost:3000",
+      "https://shads-ai-wheat.vercel.app",
+    ];
+
+    if (origin) {
+      if (allowedOrigins.includes(origin) || origin.endsWith(".vercel.app") || origin.startsWith("capacitor://") || origin.startsWith("http://localhost")) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Access-Control-Allow-Credentials", "true");
+      } else {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+      }
+    } else {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    }
+
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin, Cache-Control, Pragma");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Type");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-XSS-Protection", "1; mode=block");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");

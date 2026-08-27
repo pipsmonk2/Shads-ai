@@ -3,13 +3,21 @@
 	"appName": "Shads AI",
 	"webDir": "dist",
 	"server": {
-		"androidScheme": "https"
+		"androidScheme": "https",
+		"cleartext": true,
+		"allowNavigation": [
+			"shads-ai-wheat.vercel.app",
+			"*.vercel.app"
+		]
 	},
 	"plugins": {
+		"CapacitorHttp": {
+			"enabled": true
+		},
 		"SplashScreen": {
 			"launchShowDuration": 2000,
 			"launchAutoHide": true,
-			"backgroundColor": "#050709",
+			"backgroundColor": "#000000",
 			"androidSplashResourceName": "splash",
 			"androidScaleType": "CENTER_CROP",
 			"showSpinner": false
