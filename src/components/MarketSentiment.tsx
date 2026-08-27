@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Globe, RefreshCw, TrendingUp, TrendingDown, HelpCircle, AlertOctagon, Flame, Zap, ShieldAlert, ArrowUpRight, ArrowDownRight, Compass, Bell, Clock, Maximize2, Minimize2, ChevronDown, ChevronUp, X } from "lucide-react";
 import { SentimentData, SentimentEvent } from "../types";
 import { shadsAudio } from "../utils/audio";
+import { getApiUrl } from "../utils/api";
 
 interface HighImpactCountdownWidgetProps {
   events: SentimentEvent[];
@@ -174,7 +175,7 @@ export default function MarketSentiment() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/sentiment");
+      const response = await fetch(getApiUrl("/api/sentiment"));
       if (!response.ok) {
         throw new Error("Failed to load real-time market sentiment.");
       }

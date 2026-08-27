@@ -82,7 +82,7 @@ async function generateAndroidAssets() {
         width: dr.w,
         height: dr.h,
         channels: 4,
-        background: { r: 5, g: 7, b: 9, alpha: 1 }
+        background: { r: 0, g: 0, b: 0, alpha: 1 }
       }
     })
       .composite([{

@@ -235,29 +235,7 @@ export default function SettingsPanel({
             </select>
           </div>
 
-          {/* 5. DOWNLOAD ANDROID APK (STANDALONE INSTALLER) */}
-          <div className="p-3 rounded-xl bg-black border border-[#00FF66] shadow-[0_0_15px_rgba(0,255,102,0.2)] flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="font-black text-[#00FF66] text-xs flex items-center gap-1.5 neon-glow-text">
-                <span>ANDROID APK (STANDALONE)</span>
-                <span className="text-[9px] px-1.5 py-0.2 bg-[#00FF66] text-black font-extrabold rounded">v1.0</span>
-              </div>
-              <div className="text-[10px] text-[#00FF66]/75 mt-0.5">
-                Install direct on your Android device (Signed APK, 7.01 MB)
-              </div>
-            </div>
-            <a
-              id="btn-settings-download-apk"
-              href="/ShadsAI_v1.0.apk"
-              download="ShadsAI_v1.0.apk"
-              onClick={() => shadsAudio.playClick()}
-              className="px-3.5 py-2 rounded-lg bg-[#00FF66] text-black font-black text-[11px] uppercase tracking-wider hover:bg-[#00e65c] transition-all shadow-[0_0_12px_rgba(0,255,102,0.4)] shrink-0 active:scale-95 flex items-center gap-1"
-            >
-              <span>DOWNLOAD</span>
-            </a>
-          </div>
-
-          {/* 6. CLEAR HISTORY ACTION */}
+          {/* 5. CLEAR HISTORY ACTION */}
           <div className="pt-2 border-t border-[#00FF66]/20 flex items-center justify-between">
             <div>
               <span className="text-[10px] text-[#00FF66]/70 font-bold block">SAVED SCANS</span>

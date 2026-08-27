@@ -44,6 +44,8 @@ jobs:
         run: node scripts/generate_android_icons.cjs
 
       - name: Build Web Application
+        env:
+          VITE_API_BASE_URL: https://shads-ai-wheat.vercel.app
         run: npm run build:client
 
       - name: Sync Capacitor Android Project

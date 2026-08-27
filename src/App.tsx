@@ -22,6 +22,7 @@ import { ScanResult } from "./types";
 import { shadsAudio } from "./utils/audio";
 import { defaultInitialScan } from "./utils/defaultScan";
 import { loadAppSettings, saveAppSettings, loadScansFromStorage, saveScansToStorage, clearScansStorage } from "./utils/storage";
+import { getApiUrl } from "./utils/api";
 
 function normalizeDetectedPair(rawPair?: string, fallback: string = "EUR/USD"): string {
   if (!rawPair || rawPair === "UNKNOWN" || rawPair === "UNKNOWN_PAIR") return fallback;
@@ -143,7 +144,7 @@ export default function App() {
     shadsAudio.playScanBeep(440);
 
     try {
-      const response = await fetch("/api/scan", {
+      const response = await fetch(getApiUrl("/api/scan"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
