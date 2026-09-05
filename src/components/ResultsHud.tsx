@@ -134,8 +134,9 @@ ${result.takeProfit3 ? `TP3: ${result.takeProfit3} [Macro Expansion]\n` : ""}${r
               <h2 className="text-xs sm:text-sm font-black uppercase tracking-widest text-[#34d399] flex items-center gap-2">
                 <span className="neon-glow-text floating-text">SHADS AI // SCAN RESULT</span>
                 {result && (
-                  <span className="text-[10px] px-2 py-0.5 rounded border border-[#00FF66]/60 bg-black text-[#34d399] font-bold floating-text-delay shadow-[0_0_10px_rgba(0,255,102,0.15)]">
-                    {result.pair} &bull; {result.timeframe}
+                  <span className="text-[10px] px-2 py-0.5 rounded border border-[#00FF66]/60 bg-black text-[#34d399] font-bold floating-text-delay shadow-[0_0_10px_rgba(0,255,102,0.15)] flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-[#00FF66]" />
+                    <span>{result.pair} &bull; {result.timeframe}</span>
                   </span>
                 )}
               </h2>

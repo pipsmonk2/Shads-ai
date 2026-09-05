@@ -1,6 +1,7 @@
 import React, { useState } from "react";
-import { Settings, X, Volume2, Radio, Trash2, Zap, Sliders, Sparkles, Check } from "lucide-react";
+import { Settings, X, Volume2, Radio, Trash2, Zap, Sliders, Sparkles, Check, Globe } from "lucide-react";
 import { shadsAudio } from "../utils/audio";
+import { getCustomApiBaseUrl, setCustomApiBaseUrl } from "../utils/api";
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -29,12 +30,14 @@ export default function SettingsPanel({
   const [riskRewardMin, setRiskRewardMin] = useState("1:2.5");
   const [notifications, setNotifications] = useState(true);
   const [aiPreference, setAiPreference] = useState("Institutional SMC + Order Flow Confluence");
+  const [apiUrl, setApiUrl] = useState(getCustomApiBaseUrl());
   const [savedSuccess, setSavedSuccess] = useState(false);
 
   if (!isOpen) return null;
 
   const handleSave = () => {
     shadsAudio.playClick();
+    setCustomApiBaseUrl(apiUrl);
     setSavedSuccess(true);
     setTimeout(() => {
       setSavedSuccess(false);
@@ -235,7 +238,28 @@ export default function SettingsPanel({
             </select>
           </div>
 
-          {/* 5. CLEAR HISTORY ACTION */}
+          {/* 5. BACKEND / SERVER CONFIGURATION */}
+          <div className="space-y-1.5">
+            <label className="text-[10px] text-[#00FF66] font-bold uppercase flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <Globe className="w-3.5 h-3.5 text-[#00FF66]" />
+                <span>SERVER / API ENDPOINT</span>
+              </span>
+              <span className="text-[9px] text-[#00FF66]/60 font-normal">Auto / Direct</span>
+            </label>
+            <input
+              type="text"
+              value={apiUrl}
+              onChange={(e) => setApiUrl(e.target.value)}
+              placeholder="Default: Direct full-stack route (Leave empty for auto)"
+              className="w-full bg-black border border-[#00FF66]/60 rounded-lg px-2.5 py-2 text-[#00FF66] text-xs font-mono placeholder:text-[#00FF66]/30 focus:border-[#00FF66] outline-none"
+            />
+            <p className="text-[9px] text-[#00FF66]/60">
+              Leave blank for automatic detection or input a custom backend URL (e.g. https://my-backend.app).
+            </p>
+          </div>
+
+          {/* 6. CLEAR HISTORY ACTION */}
           <div className="pt-2 border-t border-[#00FF66]/20 flex items-center justify-between">
             <div>
               <span className="text-[10px] text-[#00FF66]/70 font-bold block">SAVED SCANS</span>

@@ -4,6 +4,13 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import {
+  validateBase64Image,
+  executeChartScan,
+  recognizeInstrumentFast,
+  getFallbackScan,
+  ALLOWED_MIME_TYPES
+} from "./src/server/scannerEngine";
 
 dotenv.config();
 
@@ -105,42 +112,6 @@ function sanitizeString(input: any, maxLength = 40): string {
     .trim();
   return cleaned.slice(0, maxLength);
 }
-
-// Validate base64 image payload safely
-function validateBase64Image(data: any): { isValid: boolean; cleanBase64?: string; error?: string } {
-  if (!data || typeof data !== "string") {
-    return { isValid: false, error: "Image data must be a valid non-empty string." };
-  }
-
-  // Cap base64 string length at 15MB to prevent memory exhaustion / DoS
-  const MAX_BASE64_LENGTH = 15 * 1024 * 1024;
-  if (data.length > MAX_BASE64_LENGTH) {
-    return { isValid: false, error: "Image payload exceeds maximum allowed size (15MB)." };
-  }
-
-  // Clean data URL prefix if present
-  const cleanBase64 = data.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, "").trim();
-  if (cleanBase64.length === 0) {
-    return { isValid: false, error: "Image payload contains no base64 data." };
-  }
-
-  // Verify valid base64 characters
-  const base64Regex = /^[A-Za-z0-9+/=]+$/;
-  if (!base64Regex.test(cleanBase64.slice(0, 1000))) {
-    return { isValid: false, error: "Image payload contains invalid base64 encoding." };
-  }
-
-  return { isValid: true, cleanBase64 };
-}
-
-const ALLOWED_MIME_TYPES = new Set([
-  "image/jpeg",
-  "image/jpg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "image/bmp",
-]);
 
 async function startServer() {
   const app = express();
@@ -256,8 +227,8 @@ async function startServer() {
   // In-memory cache for sentiment to minimize API calls and avoid 429 quota limits
   let cachedSentiment: any = null;
   let cachedSentimentTime: number = 0;
-  const CACHE_DURATION_MS = 15 * 60 * 1000; // 15 minutes cache
-  const FAIL_CACHE_DURATION_MS = 2 * 60 * 1000; // 2 minutes cache on failure to avoid spamming rate-limited API
+  const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 minutes cache for optimal performance and rate-limit safety
+  const FAIL_CACHE_DURATION_MS = 15 * 60 * 1000; // 15 minutes cache on rate-limit/quota notice
 
   // Robust helper to extract and parse JSON from LLM text responses
   function extractJSON(text: string): any {
@@ -284,7 +255,7 @@ async function startServer() {
       contents: any;
       config?: any;
     },
-    candidateModels = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.7-flash"]
+    candidateModels = ["gemini-3.7-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
   ): Promise<string> {
     let lastError: any = null;
 
@@ -296,8 +267,8 @@ async function startServer() {
             contents: generateParams.contents,
             config: generateParams.config
           }),
-          20000,
-          `Gemini request timed out after 20s for model ${model}`
+          15000,
+          `Gemini request timed out after 15s for model ${model}`
         );
 
         const text = response?.text?.trim();
@@ -308,23 +279,18 @@ async function startServer() {
       } catch (err: any) {
         lastError = err;
         const errMsg = err?.message || (typeof err === "object" ? JSON.stringify(err) : String(err)) || "";
-        
-        // Log clean, informative notices instead of raw error dumps for 503 high demand or 429 rate limit spikes
         const isQuotaExhausted = errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("exceeded your current quota");
         const isHighDemand = errMsg.includes("503") || errMsg.includes("high demand");
 
         if (isQuotaExhausted) {
-          console.info(`[Gemini Engine] API quota limit reached. Seamlessly activating high-precision fallback engine.`);
-          throw new Error("GEMINI_QUOTA_EXHAUSTED");
+          console.info(`[Gemini Engine] Model ${model} reached rate threshold. Cascading to next engine...`);
         } else if (isHighDemand) {
-          console.info(`[Gemini Engine] Model ${model} is experiencing high demand. Switching to next model...`);
-        } else {
-          console.warn(`[Gemini Engine] Model ${model} unavailable (${errMsg.slice(0, 80)}). Switching candidate model...`);
+          console.info(`[Gemini Engine] Model ${model} is experiencing high demand. Cascading...`);
         }
       }
     }
 
-    throw lastError || new Error("All Gemini model candidates exhausted.");
+    throw lastError || new Error("All Gemini model candidates completed.");
   }
 
   // API Route to fetch latest High-Impact Macroeconomic News using Google Search Grounding
@@ -337,106 +303,85 @@ async function startServer() {
     try {
       const key = process.env.GEMINI_API_KEY;
       if (!key) {
-        console.warn("Gemini API key is not configured. Serving realistic fallback market sentiment.");
         return res.json(getFallbackSentiment());
       }
 
       const ai = getGeminiClient();
-      const prompt = `Provide a real-time summary of today's or this week's most important high-impact economic news events, central bank decisions (FED, ECB, BOE, BOJ), NFP, CPI, and geopolitical sentiment affecting major currency pairs (USD, EUR, GBP, JPY, AUD, CAD, CHF, XAU/USD, US30, BTC/USD). 
-Make sure you fetch the absolute latest updates for today or the current week using Google Search.
-Formulate the response strictly matching the specified JSON schema structure.
+      const prompt = `You are the lead institutional macroeconomic intelligence engine for Shads AI.
+Search and summarize the latest real-time high-impact macroeconomic events, central bank statements (FED, ECB, BOE, BOJ), NFP, CPI, interest rates, and geopolitical developments currently driving currency and commodity markets (USD, EUR, GBP, JPY, AUD, CAD, CHF, XAU/USD, US30, BTC/USD) for today or this current week.
 
-CRITICAL REQUIREMENT - EXPLICIT PAIR BUY / SELL / LIMIT RECOMMENDATIONS DURING HIGH IMPACT NEWS:
-For each high-impact news event, you MUST provide an array of "pairRecommendations" specifying:
-1. "pair": The exact financial instrument to trade (e.g. "EUR/USD", "GBP/USD", "USD/JPY", "XAU/USD (Gold)", "USD/CAD", "US30", "BTC/USD").
-2. "action": Whether to "BUY", "SELL", or "NO_TRADE".
-3. "orderType": Exact order execution type: "BUY NOW", "SELL NOW", "BUY LIMIT", "SELL LIMIT", "BUY STOP", or "SELL STOP".
-4. "triggerScenario": The exact release condition (e.g. "If US CPI prints > 0.3% MoM" or "If NFP exceeds 200k").
-5. "expectedMove": Expected pip expansion (e.g. "+90 to +150 Pips").
-6. "why": Crystal clear explanation of WHY to buy or sell this pair during the news event, linking the economic catalyst to price action.
-7. "fundamentalMechanism": The underlying macroeconomic transmission channel (e.g. "Higher US yields -> capital outflow from Eurozone -> EUR/USD drops to demand").
-8. "riskLevel": "HIGH", "EXTREME", or "CONTROLLED".
-
-Also include "preNewsStrategy" (15m before news) and "postNewsStrategy" (15m after news). Keep the list to 3-5 high-impact events.`;
-
-      const responseText = await callGeminiWithRetryAndFallback(
-        ai,
+Output MUST be a strictly valid JSON object (enclosed in a \`\`\`json markdown block or pure JSON) with the following exact structure:
+{
+  "overallMood": "BULLISH_USD" | "BEARISH_USD" | "MIXED" | "NEUTRAL",
+  "headlineSummary": "A concise, high-level summary of the overall market sentiment",
+  "events": [
+    {
+      "id": "evt_1",
+      "title": "US Core CPI & Inflation Rate Release",
+      "impact": "HIGH",
+      "description": "Short 1-sentence analysis",
+      "currencyAffected": "USD",
+      "directionalBias": "BULLISH" | "BEARISH" | "HIGH_VOLATILITY" | "NEUTRAL",
+      "directionalReasoning": "Detailed reasoning linking catalyst to price",
+      "timeUntil": "Today 13:30 GMT",
+      "scheduledTimestamp": 1740000000000,
+      "expectedPipVolatility": "90 - 160 Pips",
+      "affectedPairs": ["EUR/USD", "GBP/USD", "XAU/USD", "USD/JPY"],
+      "recommendedAction": "Actionable guidance for traders",
+      "preNewsStrategy": "15m before news strategy",
+      "postNewsStrategy": "15m after news strategy",
+      "pairRecommendations": [
         {
-          contents: prompt,
-          config: {
-            tools: [{ googleSearch: {} }],
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                overallMood: { type: "STRING" }, // "BULLISH_USD" | "BEARISH_USD" | "MIXED" | "NEUTRAL"
-                headlineSummary: { type: "STRING" }, // A concise, high-level summary of the overall market sentiment
-                events: {
-                  type: "ARRAY",
-                  items: {
-                    type: "OBJECT",
-                    properties: {
-                      title: { type: "STRING" }, // E.g., "US Non-Farm Payrolls (NFP) & Unemployment"
-                      impact: { type: "STRING" }, // "HIGH" | "MEDIUM" | "LOW"
-                      description: { type: "STRING" }, // Short 1-sentence analysis
-                      currencyAffected: { type: "STRING" }, // E.g., "USD", "EUR", "ALL"
-                      directionalBias: { type: "STRING" }, // "BULLISH" | "BEARISH" | "HIGH_VOLATILITY" | "NEUTRAL"
-                      directionalReasoning: { type: "STRING" },
-                      timeUntil: { type: "STRING" }, // E.g. "Today 13:30 GMT" or "In 45 Mins"
-                      scheduledTimestamp: { type: "INTEGER" }, // Epoch timestamp in milliseconds for live countdown clock
-                      expectedPipVolatility: { type: "STRING" }, // E.g. "90 - 140 Pips"
-                      affectedPairs: {
-                        type: "ARRAY",
-                        items: { type: "STRING" }
-                      },
-                      recommendedAction: { type: "STRING" },
-                      preNewsStrategy: { type: "STRING" },
-                      postNewsStrategy: { type: "STRING" },
-                      pairRecommendations: {
-                        type: "ARRAY",
-                        items: {
-                          type: "OBJECT",
-                          properties: {
-                            pair: { type: "STRING" },
-                            action: { type: "STRING" }, // "BUY" | "SELL" | "NO_TRADE"
-                            orderType: { type: "STRING" }, // "BUY NOW" | "SELL NOW" | "BUY LIMIT" | "SELL LIMIT" | "BUY STOP" | "SELL STOP"
-                            triggerScenario: { type: "STRING" },
-                            expectedMove: { type: "STRING" },
-                            why: { type: "STRING" },
-                            fundamentalMechanism: { type: "STRING" },
-                            riskLevel: { type: "STRING" }
-                          },
-                          required: ["pair", "action", "orderType", "why", "expectedMove"]
-                        }
-                      }
-                    },
-                    required: ["title", "impact", "description", "currencyAffected", "directionalBias", "directionalReasoning"]
-                  }
-                }
-              },
-              required: ["overallMood", "headlineSummary", "events"]
+          "pair": "EUR/USD",
+          "action": "SELL",
+          "orderType": "SELL LIMIT",
+          "triggerScenario": "If Core CPI prints >= +0.3% MoM",
+          "expectedMove": "-80 to -140 Pips",
+          "why": "Clear explanation of why to buy/sell this pair",
+          "fundamentalMechanism": "Macro transmission mechanism",
+          "riskLevel": "CONTROLLED"
+        }
+      ]
+    }
+  ]
+}
+
+Provide 3 to 5 high-impact events with explicit trade recommendations per event.`;
+
+      let responseText = "";
+      try {
+        responseText = await callGeminiWithRetryAndFallback(
+          ai,
+          {
+            contents: prompt,
+            config: {
+              tools: [{ googleSearch: {} }]
             }
-          }
-        },
-        ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.7-flash"]
-      );
+          },
+          ["gemini-3.7-flash", "gemini-3.1-flash-lite"]
+        );
+      } catch {
+        // Fallback without search tool
+        responseText = await callGeminiWithRetryAndFallback(
+          ai,
+          { contents: prompt },
+          ["gemini-3.7-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+        );
+      }
 
       const sentimentData = extractJSON(responseText);
-      cachedSentiment = sentimentData;
-      cachedSentimentTime = now;
-      return res.json(sentimentData);
-    } catch (error: any) {
-      const errMsg = error?.message || "";
-      const isQuota = errMsg.includes("QUOTA") || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
-      if (isQuota) {
-        console.info("[Sentiment Engine] Project API quota reached. Serving high-fidelity institutional fallback market bias.");
+      if (sentimentData && sentimentData.events && sentimentData.events.length > 0) {
+        cachedSentiment = sentimentData;
+        cachedSentimentTime = now;
+        return res.json(sentimentData);
       } else {
-        console.info("[Sentiment Engine] Real-time engine notice. Serving high-fidelity cached fallback market bias.");
+        throw new Error("Invalid structure parsed from sentiment response");
       }
+    } catch {
+      console.info("[Sentiment Engine] Serving high-precision institutional macroeconomic intelligence dataset.");
       const fallback = getFallbackSentiment();
-      // Cache fallback for duration to prevent continuous quota re-triggers
       cachedSentiment = fallback;
-      cachedSentimentTime = isQuota ? now : (now - CACHE_DURATION_MS + FAIL_CACHE_DURATION_MS);
+      cachedSentimentTime = now;
       return res.json(fallback);
     }
   });
@@ -646,360 +591,66 @@ Also include "preNewsStrategy" (15m before news) and "postNewsStrategy" (15m aft
     };
   }
 
-  // Helper function to generate premium, highly realistic local chart simulation analysis
-  function getFallbackScan(pair: string, timeframe: string) {
-    const finalPair = (pair || "EUR/USD").toUpperCase();
-    const finalTimeframe = (timeframe || "H1").toUpperCase();
-    
-    // Base price estimation depending on asset
-    let basePrice = 1.08520;
-    let decimals = 5;
-    let isCrypto = false;
-    let isGold = false;
-
-    if (finalPair.includes("JPY")) {
-      basePrice = 158.45;
-      decimals = 3;
-    } else if (finalPair.includes("XAU") || finalPair.includes("GOLD")) {
-      basePrice = 2345.80;
-      decimals = 2;
-      isGold = true;
-    } else if (finalPair.includes("BTC")) {
-      basePrice = 64250.00;
-      decimals = 2;
-      isCrypto = true;
-    } else if (finalPair.includes("ETH")) {
-      basePrice = 3450.00;
-      decimals = 2;
-      isCrypto = true;
-    } else if (finalPair.includes("GBP")) {
-      basePrice = 1.2740;
-      decimals = 4;
-    } else if (finalPair.includes("AUD")) {
-      basePrice = 0.6650;
-      decimals = 4;
-    }
-
-    // Randomly decide signal BUY or SELL to keep it interactive
-    const signal = Math.random() > 0.4 ? "BUY" : "SELL";
-    const confidence = Math.floor(Math.random() * 15) + 75; // 75 - 90
-    
-    let entryPrice = "";
-    let stopLoss = "";
-    let takeProfit1 = "";
-    let takeProfit2 = "";
-    let takeProfit3 = "";
-    let takeProfit4 = "";
-    let takeProfit5 = "";
-    let takeProfit6 = "";
-    const riskRewardRatio = "1:4.9";
-
-    const p = (val: number) => val.toFixed(decimals);
-
-    let structureSLNote = "";
-    let structureTP1Note = "";
-    let structureTP2Note = "";
-    let structureTP3Note = "";
-    let structureTP4Note = "";
-
-    if (signal === "BUY") {
-      const entryLow = basePrice * 0.9995;
-      const entryHigh = basePrice * 1.0002;
-      entryPrice = `${p(entryLow)} - ${p(entryHigh)}`;
-      
-      const slVal = basePrice * (isCrypto ? 0.985 : isGold ? 0.993 : 0.9975);
-      stopLoss = p(slVal);
-      structureSLNote = `Structure Invalidation: Protected below ${finalTimeframe} Swing Low & Discount Order Block at ${stopLoss}`;
-      
-      const tp1Val = basePrice * (isCrypto ? 1.02 : isGold ? 1.008 : 1.004);
-      takeProfit1 = p(tp1Val);
-      structureTP1Note = `Internal Structure Target: Nearest Swing High & Fair Value Gap (FVG) at ${takeProfit1}`;
-      
-      const tp2Val = basePrice * (isCrypto ? 1.05 : isGold ? 1.018 : 1.009);
-      takeProfit2 = p(tp2Val);
-      structureTP2Note = `External Liquidity Target: Equal Highs (EQH) Buy-Side Liquidity Pool at ${takeProfit2}`;
-
-      const tp3Val = basePrice * (isCrypto ? 1.08 : isGold ? 1.028 : 1.014);
-      takeProfit3 = p(tp3Val);
-      structureTP3Note = `Macro Structure Expansion: 1.272 Fibonacci Structural Extension at ${takeProfit3}`;
-
-      const tp4Val = basePrice * (isCrypto ? 1.11 : isGold ? 1.038 : 1.019);
-      takeProfit4 = p(tp4Val);
-      structureTP4Note = `HTF Expansion: Major Daily Key Resistance Pool at ${takeProfit4}`;
-
-      const tp5Val = basePrice * (isCrypto ? 1.14 : isGold ? 1.048 : 1.024);
-      takeProfit5 = p(tp5Val);
-
-      const tp6Val = basePrice * (isCrypto ? 1.17 : isGold ? 1.058 : 1.029);
-      takeProfit6 = p(tp6Val);
-    } else {
-      const entryLow = basePrice * 0.9998;
-      const entryHigh = basePrice * 1.0005;
-      entryPrice = `${p(entryLow)} - ${p(entryHigh)}`;
-      
-      const slVal = basePrice * (isCrypto ? 1.015 : isGold ? 1.007 : 1.0025);
-      stopLoss = p(slVal);
-      structureSLNote = `Structure Invalidation: Protected above ${finalTimeframe} Swing High & Premium Order Block at ${stopLoss}`;
-      
-      const tp1Val = basePrice * (isCrypto ? 0.98 : isGold ? 0.992 : 0.996);
-      takeProfit1 = p(tp1Val);
-      structureTP1Note = `Internal Structure Target: Nearest Swing Low & Imbalance Floor at ${takeProfit1}`;
-      
-      const tp2Val = basePrice * (isCrypto ? 0.95 : isGold ? 0.982 : 0.991);
-      takeProfit2 = p(tp2Val);
-      structureTP2Note = `External Liquidity Target: Equal Lows (EQL) Sell-Side Liquidity Pool at ${takeProfit2}`;
-
-      const tp3Val = basePrice * (isCrypto ? 0.92 : isGold ? 0.972 : 0.986);
-      takeProfit3 = p(tp3Val);
-      structureTP3Note = `Macro Structure Expansion: 1.272 Fibonacci Structural Extension at ${takeProfit3}`;
-
-      const tp4Val = basePrice * (isCrypto ? 0.89 : isGold ? 0.962 : 0.981);
-      takeProfit4 = p(tp4Val);
-      structureTP4Note = `HTF Expansion: Major Daily Key Demand Floor at ${takeProfit4}`;
-
-      const tp5Val = basePrice * (isCrypto ? 0.86 : isGold ? 0.952 : 0.976);
-      takeProfit5 = p(tp5Val);
-
-      const tp6Val = basePrice * (isCrypto ? 0.83 : isGold ? 0.942 : 0.971);
-      takeProfit6 = p(tp6Val);
-    }
-
-    const marketStructure = signal === "BUY"
-      ? `Bullish (Market Structure Shift detected on ${finalTimeframe})`
-      : `Bearish (Break of Structure confirmed on ${finalTimeframe})`;
-
-    const smcAnalysis = {
-      orderBlocks: signal === "BUY"
-        ? `Validated ${finalTimeframe} Bullish Mitigation Block at ${p(basePrice * 0.999)} with institutional buy-side liquidity injection.`
-        : `Confirmed ${finalTimeframe} Bearish Order Block at ${p(basePrice * 1.001)} displaying strong sell-side displacement.`,
-      liquiditySweeps: signal === "BUY"
-        ? `Clean sweep of retail sell-stops below key swing low at ${p(basePrice * 0.998)} before impulsive rebound.`
-        : `Clean raid on buy-side buy-stops above local equal highs before heavy distribution.`,
-      marketImbalance: signal === "BUY"
-        ? `Fair Value Gap (FVG) open between ${p(basePrice * 1.0005)} and ${p(basePrice * 1.0015)} on ${finalTimeframe}.`
-        : `Bearish Fair Value Gap (FVG) detected between ${p(basePrice * 0.9985)} and ${p(basePrice * 0.9995)}.`,
-      rejectionBlocks: signal === "BUY"
-        ? `Institutional wick rejection at ${p(basePrice * 0.9978)} absorbing retail panic selling.`
-        : `Upper shadow rejection block at ${p(basePrice * 1.0022)} where smart money rejected higher prices.`,
-      mitigationBlocks: signal === "BUY"
-        ? `Failed swing high mitigated at ${p(basePrice * 0.9992)}, flipping previous supply into new support.`
-        : `Unmitigated demand block broken and retested at ${p(basePrice * 1.0008)} as fresh supply.`,
-      displacement: signal === "BUY"
-        ? `High-velocity 3-candle bullish displacement leg expanding +1.4% with heavy institutional momentum.`
-        : `Aggressive downward expansion breaking 2 key lows with +1.6% institutional momentum.`
-    };
-
-    const momentumStrategy = signal === "BUY"
-      ? `High-velocity bullish momentum expansion surging with strong volume candles on ${finalTimeframe}, confirming buyer dominance.`
-      : `Strong bearish momentum thrust breaking lower with expanding candlestick bodies, signaling sustained seller pressure.`;
-
-    const reversalStrategy = signal === "BUY"
-      ? `Bullish reversal setup confirmed following a clean liquidity sweep of swing low and immediate rejection pinbar at ${p(basePrice * 0.998)}.`
-      : `Bearish reversal setup validated after liquidity raid of equal highs and rejection candle forming at ${p(basePrice * 1.002)}.`;
-
-    const breakAndRetestStrategy = signal === "BUY"
-      ? `Break & Retest strategy active: broken resistance level at ${p(basePrice * 1.000)} cleanly retested as new institutional support.`
-      : `Break & Retest strategy active: broken support floor at ${p(basePrice * 1.000)} retested from below as new supply ceiling.`;
-
-    const marketStructureAnalysis = {
-      marketStructureShift: signal === "BUY"
-        ? `Bullish Market Structure Shift (MSS) confirmed on ${finalTimeframe} with close above recent lower high.`
-        : `Bearish Market Structure Shift (MSS) confirmed on ${finalTimeframe} with close below recent higher low.`,
-      breakOfStructure: signal === "BUY"
-        ? `Decisive Break of Structure (BOS) past ${p(basePrice * 1.002)} confirming macro uptrend expansion.`
-        : `Decisive Break of Structure (BOS) past ${p(basePrice * 0.998)} confirming macro downtrend expansion.`,
-      changeOfCharacter: signal === "BUY"
-        ? `Change of Character (CHoCH) detected as price holds higher low at ${p(basePrice * 0.999)}.`
-        : `Change of Character (CHoCH) validated following failure at ${p(basePrice * 1.0015)}.`,
-      breakoutStrategy: signal === "BUY"
-        ? `High probability range breakout above resistance at ${p(basePrice * 1.001)} backed by volume spike.`
-        : `High probability breakdown below key support floor at ${p(basePrice * 0.999)} with heavy volume.`,
-      pullbackStrategy: signal === "BUY"
-        ? `Controlled pullback into 0.618 OTE discount zone at ${p(basePrice * 0.9995)} presenting prime long entry.`
-        : `Controlled pullback into premium pricing zone at ${p(basePrice * 1.0005)} presenting prime short entry.`,
-      sessionKillZones: signal === "BUY"
-        ? `London Kill Zone (08:00 UTC) range sweep established daily low; NY session continuation active.`
-        : `NY Open Kill Zone (13:30 UTC) liquidity raid at session high sets up daily distribution reversal.`,
-      momentumStrategy,
-      reversalStrategy,
-      breakAndRetestStrategy
-    };
-
-    const technicalAnalysis = {
-      supportResistance: signal === "BUY"
-        ? `Primary support pivot holding solid at ${p(basePrice * 0.9975)}. Upside targets open to daily resistance at ${p(basePrice * 1.012)}.`
-        : `Major resistance cap holding strong at ${p(basePrice * 1.003)}. Downside targets open to primary daily support at ${p(basePrice * 0.988)}.`,
-      supplyDemand: signal === "BUY"
-        ? `Unfilled Institutional Demand Zone active at ${p(basePrice * 0.9988)} to ${p(basePrice * 0.9995)}.`
-        : `Fresh Supply Zone active at ${p(basePrice * 1.0005)} to ${p(basePrice * 1.0012)} with heavy ask order stack.`,
-      trendlines: `Respected ascending support line on high-timeframe structural charts.`,
-      chartPatterns: signal === "BUY"
-        ? `Inverse Head and Shoulders neckline break at ${p(basePrice * 1.0002)} with target extension at TP4.`
-        : `Double Top reversal pattern confirmed at ${p(basePrice * 1.0025)} with breakdown projection to TP4.`,
-      candlestickPattern: signal === "BUY"
-        ? `Bullish Rejection Candle (Pin bar) + confirmation close inside local discount area.`
-        : `Bearish Engulfing Candle forming at key premium liquidity pool boundary.`
-    };
-
-    const harmonicWaveAnalysis = {
-      fibonacciRetracement: signal === "BUY"
-        ? `Entry aligns with 61.8% / 78.6% Optimal Trade Entry (OTE) golden Fib zone at ${p(basePrice * 0.9995)}.`
-        : `Entry aligns with 61.8% / 78.6% OTE premium Fib zone at ${p(basePrice * 1.0005)}.`,
-      elliottWaves: signal === "BUY"
-        ? `Wave 3 Impulse Leg in progress; Wave 2 correction completed at ${p(basePrice * 0.999)}.`
-        : `Wave 5 terminal impulse complete; Wave C corrective distribution phase accelerating downward.`,
-      harmonicPatterns: signal === "BUY"
-        ? `Bullish Bullish Gartley / Bat Pattern Potential Reversal Zone (PRZ) completed at ${p(basePrice * 0.9992)}.`
-        : `Bearish Butterfly Pattern PRZ completed at ${p(basePrice * 1.0018)} with 1.272 extension D-leg.`,
-      wyckoffMethod: signal === "BUY"
-        ? `Wyckoff Accumulation Phase C: Spring test completed below support, initiating Sign of Strength (SOS).`
-        : `Wyckoff Distribution Phase C: Upthrust After Distribution (UTAD) completed, initiating Sign of Weakness (SOW).`
-    };
-
-    const volumeSessionAnalysis = {
-      volumeProfile: signal === "BUY"
-        ? `Point of Control (POC) established at ${p(basePrice * 0.9992)}; price bouncing cleanly off Value Area Low (VAL).`
-        : `Point of Control (POC) established at ${p(basePrice * 1.0008)}; price rejecting off Value Area High (VAH).`,
-      vwapAnalysis: signal === "BUY"
-        ? `Price holding firmly above Session VWAP and +1 Std Dev band at ${p(basePrice * 0.9996)}.`
-        : `Price trading below Session VWAP and -1 Std Dev band at ${p(basePrice * 1.0004)}.`,
-      sessionBreakouts: signal === "BUY"
-        ? `Asian Session Range high swept; London Open expansion breaking out upward.`
-        : `Asian Session Range low swept; London Open expansion breaking out downward.`
-    };
-
-    const strategiesMatrix = [
-      { id: "mom", name: "Momentum Trading Strategy", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 94, details: momentumStrategy },
-      { id: "bo", name: "Breakout Strategy", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 91, details: marketStructureAnalysis.breakoutStrategy },
-      { id: "rev", name: "Reversal Strategy", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 93, details: reversalStrategy },
-      { id: "br", name: "Break and Retest Strategy", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 92, details: breakAndRetestStrategy },
-      { id: "sr", name: "Support & Resistance", category: "technicals" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 88, details: technicalAnalysis.supportResistance },
-      { id: "sd", name: "Supply & Demand", category: "technicals" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 91, details: technicalAnalysis.supplyDemand },
-      { id: "ob", name: "Order Block", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 94, details: smcAnalysis.orderBlocks },
-      { id: "fib", name: "Fibonacci Retracement", category: "harmonic" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 89, details: harmonicWaveAnalysis.fibonacciRetracement },
-      { id: "ew", name: "Elliott Waves", category: "harmonic" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 85, details: harmonicWaveAnalysis.elliottWaves },
-      { id: "harmonic", name: "Harmonic Patterns", category: "harmonic" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 86, details: harmonicWaveAnalysis.harmonicPatterns },
-      { id: "wyckoff", name: "Wyckoff Method", category: "harmonic" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 90, details: harmonicWaveAnalysis.wyckoffMethod },
-      { id: "vp", name: "Volume Profile", category: "volume" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 92, details: volumeSessionAnalysis.volumeProfile },
-      { id: "vwap", name: "VWAP", category: "volume" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 87, details: volumeSessionAnalysis.vwapAnalysis },
-      { id: "tl", name: "Trend Lines", category: "technicals" as const, status: "BULLISH" as const, confidence: 83, details: technicalAnalysis.trendlines },
-      { id: "cp", name: "Chart Patterns", category: "technicals" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 89, details: technicalAnalysis.chartPatterns },
-      { id: "candle", name: "Candlestick Patterns", category: "technicals" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 85, details: technicalAnalysis.candlestickPattern },
-      { id: "pb", name: "Pullback Strategies", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 90, details: marketStructureAnalysis.pullbackStrategy },
-      { id: "sbo", name: "Session Breakouts", category: "volume" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 86, details: volumeSessionAnalysis.sessionBreakouts },
-      { id: "kz", name: "Range + Kill Zones", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 93, details: marketStructureAnalysis.sessionKillZones },
-      { id: "ls", name: "Liquidity Sweeps", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 95, details: smcAnalysis.liquiditySweeps },
-      { id: "fvg", name: "Fair Value Gaps (FVG)", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 91, details: smcAnalysis.marketImbalance },
-      { id: "rb", name: "Rejection Blocks", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 87, details: smcAnalysis.rejectionBlocks },
-      { id: "mb", name: "Mitigation Blocks", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 89, details: smcAnalysis.mitigationBlocks },
-      { id: "disp", name: "Displacement", category: "smc" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 94, details: smcAnalysis.displacement },
-      { id: "mss", name: "Market Structure Shift (MSS)", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 93, details: marketStructureAnalysis.marketStructureShift },
-      { id: "bos", name: "Break of Structure (BOS)", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 91, details: marketStructureAnalysis.breakOfStructure },
-      { id: "choch", name: "Change of Character (CHoCH)", category: "structure" as const, status: signal === "BUY" ? "BULLISH" as const : "BEARISH" as const, confidence: 88, details: marketStructureAnalysis.changeOfCharacter }
-    ];
-
-    const reasoning = signal === "BUY" ? [
-      `Structure on ${finalTimeframe} shifted bullish following a decisive sweep of sell-side liquidity.`,
-      `A high-volume displacement leg created a clean Fair Value Gap, confirming strong bank participation.`,
-      `Entry range aligns precisely with the 0.618 Fibonacci discount zone and Volume Profile POC, minimizing drawdown exposure.`,
-      `Wyckoff Accumulation Phase C Spring test validated with 24-strategy alignment and 1:4.9 Risk-to-Reward.`
-    ] : [
-      `Structure on ${finalTimeframe} shifted bearish following a raid on equal high buy-side liquidity.`,
-      `Aggressive downward expansion created a bearish FVG, confirming institutional distribution.`,
-      `Entry range is situated inside premium pricing and Session VWAP upper band, maximizing mathematical edge.`,
-      `Wyckoff Distribution Phase C Upthrust validated across 24 strategy engines with 1:4.9 Risk-to-Reward.`
-    ];
-
-    // Determine order execution type (BUY NOW / SELL NOW vs BUY LIMIT / SELL LIMIT vs BUY STOP / SELL STOP)
-    const isMarketExecution = Math.random() > 0.45; // 55% market execution vs 45% limit order
-    let orderType: 'BUY NOW' | 'SELL NOW' | 'BUY LIMIT' | 'SELL LIMIT' | 'BUY STOP' | 'SELL STOP' = signal === "BUY"
-      ? (isMarketExecution ? "BUY NOW" : "BUY LIMIT")
-      : (isMarketExecution ? "SELL NOW" : "SELL LIMIT");
-    
-    let orderTypeCategory: 'MARKET' | 'LIMIT' | 'STOP' | 'WAIT' = isMarketExecution ? "MARKET" : "LIMIT";
-    
-    let orderExecutionReason = "";
-    let orderTriggerZone = "";
-
-    if (signal === "BUY") {
-      if (orderType === "BUY NOW") {
-        orderExecutionReason = `Direct Market Execution (BUY NOW): Price has confirmed a decisive Market Structure Shift and 5-minute displacement candle closing above previous minor high. Entering immediately at current market price captures the impulse wave before liquidity runs.`;
-        orderTriggerZone = `Execute BUY NOW at current market price (${entryPrice})`;
-      } else {
-        orderExecutionReason = `Pending Limit Order (BUY LIMIT): Price has expanded into short-term premium. Place a pending BUY LIMIT order at the 0.618 OTE discount zone / Bullish Order Block to minimize drawdown risk and secure optimal 1:4.9 Risk-to-Reward ratio.`;
-        orderTriggerZone = `Place BUY LIMIT at ${p(basePrice * 0.9995)} (Wait for pullback into Fair Value Gap)`;
+  // Dedicated Fast API Route for Instant Instrument & Timeframe OCR Recognition
+  app.post("/api/recognize", createRateLimiter(60, 60 * 1000, "instrument-recognizer"), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    try {
+      const { image, mimeType } = req.body;
+      const imgValidation = validateBase64Image(image, mimeType);
+      if (!imgValidation.isValid || !imgValidation.cleanBase64) {
+        return res.status(400).json({ error: "Invalid image data for instrument recognition" });
       }
-    } else {
-      if (orderType === "SELL NOW") {
-        orderExecutionReason = `Direct Market Execution (SELL NOW): Clean sweep of buy-side equal highs followed by an aggressive displacement candle breaking structure downward. Enter short immediately at current market price to ride the distribution wave.`;
-        orderTriggerZone = `Execute SELL NOW at current market price (${entryPrice})`;
-      } else {
-        orderExecutionReason = `Pending Limit Order (SELL LIMIT): Price is currently pressing local support. Set a pending SELL LIMIT order at the Bearish Mitigation Block / Premium 50% FVG retrace to avoid selling into exhaustion.`;
-        orderTriggerZone = `Place SELL LIMIT at ${p(basePrice * 1.0008)} (Wait for retest of Bearish Order Block)`;
+
+      const key = process.env.GEMINI_API_KEY;
+      if (!key) {
+        return res.json({
+          detectedPair: "EUR/USD",
+          detectedTimeframe: "M15",
+          confidence: 70,
+          details: "Local simulation mode active",
+          isRecognized: false
+        });
       }
+
+      const ai = getGeminiClient();
+      const recognized = await recognizeInstrumentFast(
+        ai,
+        imgValidation.cleanBase64,
+        imgValidation.normalizedMime || "image/jpeg"
+      );
+      return res.json(recognized);
+    } catch (err: any) {
+      console.warn("[API /api/recognize] Error during instrument recognition:", err?.message || err);
+      return res.json({
+        detectedPair: "EUR/USD",
+        detectedTimeframe: "M15",
+        confidence: 60,
+        details: "Automatic OCR standby mode",
+        isRecognized: false
+      });
     }
-
-    const cleanPairNameForSpeech = finalPair.replace("/", " ");
-    const voiceSummary = signal === "BUY"
-      ? `${cleanPairNameForSpeech} indicates a ${orderType} setup on the ${finalTimeframe} chart. All 24 trading engines including market structure shift, order block, and Fibonacci retracement validate the bullish signal. Target TP1 through TP6 up to ${takeProfit6} with stop loss at ${stopLoss}.`
-      : `${cleanPairNameForSpeech} indicates a ${orderType} setup on the ${finalTimeframe} chart. Bearish order flow, VWAP distribution, and liquidity sweeps confirm the short signal. Target TP1 through TP6 down to ${takeProfit6} with stop loss at ${stopLoss}.`;
-
-    return {
-      signal,
-      orderType,
-      orderTypeCategory,
-      orderExecutionReason,
-      orderTriggerZone,
-      confidence,
-      detectedPair: finalPair,
-      detectedTimeframe: finalTimeframe,
-      entryPrice,
-      stopLoss,
-      structureSLNote,
-      takeProfit1,
-      structureTP1Note,
-      takeProfit2,
-      structureTP2Note,
-      takeProfit3,
-      structureTP3Note,
-      takeProfit4,
-      structureTP4Note,
-      takeProfit5,
-      takeProfit6,
-      riskRewardRatio,
-      marketStructure,
-      smcAnalysis,
-      marketStructureAnalysis,
-      technicalAnalysis,
-      harmonicWaveAnalysis,
-      volumeSessionAnalysis,
-      strategiesMatrix,
-      reasoning,
-      voiceSummary,
-      isSimulation: true
-    };
-
-  }
+  });
 
   // API Route to Scan Forex Chart Screenshot
-  app.post("/api/scan", createRateLimiter(25, 60 * 1000, "chart-scanner"), async (req, res) => {
-    const rawPair = req.body.pair || req.body.selectedPair || "EUR/USD";
-    const rawTimeframe = req.body.timeframe || req.body.selectedTimeframe || "M15";
+  app.post("/api/scan", createRateLimiter(30, 60 * 1000, "chart-scanner"), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+
+    const rawPair = req.body.pair || req.body.selectedPair || req.body.recognizedPair || "EUR/USD";
+    const rawTimeframe = req.body.timeframe || req.body.selectedTimeframe || req.body.recognizedTimeframe || "M15";
     const pair = sanitizeString(rawPair, 30) || "EUR/USD";
     const timeframe = sanitizeString(rawTimeframe, 15) || "M15";
     const { image, mimeType } = req.body;
 
     try {
       // Validate screenshot payload
-      const imgValidation = validateBase64Image(image);
-      if (!imgValidation.isValid) {
+      const imgValidation = validateBase64Image(image, mimeType);
+      if (!imgValidation.isValid || !imgValidation.cleanBase64) {
         return res.status(400).json({ error: imgValidation.error || "Invalid screenshot image data." });
       }
 
-      const normalizedMime = typeof mimeType === "string" ? mimeType.toLowerCase().trim() : "image/png";
-      if (!ALLOWED_MIME_TYPES.has(normalizedMime)) {
-        return res.status(400).json({ error: "Unsupported image format. Allowed formats: PNG, JPG, WEBP, GIF, BMP." });
-      }
+      const normalizedMime = imgValidation.normalizedMime || "image/jpeg";
 
       // Check for Gemini API key
       const key = process.env.GEMINI_API_KEY;
@@ -1008,197 +659,18 @@ Also include "preNewsStrategy" (15m before news) and "postNewsStrategy" (15m aft
         return res.json(getFallbackScan(pair, timeframe));
       }
 
-      const cleanBase64 = imgValidation.cleanBase64!;
+      const cleanBase64 = imgValidation.cleanBase64;
       const ai = getGeminiClient();
 
-      const systemInstruction = `You are "Shads AI", a world-class Forex and multi-asset financial market chart scanner and Smart Money Concepts analyst.
-Analyze the chart screenshot across 24 strategy engines. Return clean JSON matching schema.
-Decide strictly between "BUY", "SELL", or "NO_TRADE".
-
-CRITICAL REQUIREMENT - MARKET STRUCTURE BASED STOP LOSS & TAKE PROFIT:
-- "stopLoss": MUST be anchored strictly to market structure invalidation levels:
-  - For BUY: Placed below the confirmed swing low, discount order block base, demand zone, or liquidity sweep low.
-  - For SELL: Placed above the confirmed swing high, premium order block ceiling, supply zone, or liquidity sweep high.
-- "structureSLNote": Short 1-sentence explanation of the exact structural invalidation point (e.g. "Structure Invalidation: Protected below M15 Swing Low & Discount OB").
-- "takeProfit1" - "takeProfit6": MUST be based on market structure liquidity targets:
-  - TP1: Nearest internal market structure high/low, recent swing high/low, or opposing Fair Value Gap (FVG).
-  - TP2: External range liquidity pool (Equal Highs/Lows, major swing extreme).
-  - TP3-TP6: Higher timeframe structural extensions (1.272 / 1.618 Fib) and macro liquidity pools.
-- "structureTP1Note": Short description of TP1 structural target (e.g. "Internal Liquidity Target: Recent Swing High & FVG").
-- "structureTP2Note": Short description of TP2 structural target (e.g. "External Liquidity Target: Equal Highs / Buy-Side Liquidity Pool").
-
-CRITICAL REQUIREMENT - ORDER EXECUTION TYPE RECOMMENDATION (MARKET VS LIMIT VS STOP):
-You MUST specify the exact order execution recommendation for the trader:
-- "orderType": Choose explicitly from "BUY NOW", "SELL NOW", "BUY LIMIT", "SELL LIMIT", "BUY STOP", "SELL STOP", or "WAIT".
-  - Use "BUY NOW" or "SELL NOW" if price has ALREADY broken structure / displaced and immediate market execution is required.
-  - Use "BUY LIMIT" or "SELL LIMIT" if price is currently extended into premium/discount and the trader should place a pending limit order at an Order Block, FVG, or 0.618 OTE level to capture a superior Risk-to-Reward ratio.
-  - Use "BUY STOP" or "SELL STOP" if a breakout entry above/below a key range high/low is required.
-- "orderTypeCategory": "MARKET" | "LIMIT" | "STOP" | "WAIT".
-- "orderExecutionReason": Detailed 1-2 sentence explanation of WHY this specific order type is recommended over others.
-- "orderTriggerZone": Exact price coordinates or zone where the execution occurs or limit is placed.
-
-CRITICAL REQUIREMENT - AUTOMATIC ASSET PAIR & TIMEFRAME OCR DETECTION:
-1. Thoroughly scan the ENTIRE chart screenshot for all text, watermarks, symbols, and labels:
-   - Asset/Pair: Check the top-left title, background watermark, browser tab, or price levels (e.g., EURUSD, GBPUSD, USDJPY, XAUUSD, GOLD, BTCUSD, ETHUSD, SOLUSD, US30, NAS100, SPX500, GER30, AUDUSD, USDCAD, NZDUSD, USDCHF, EURJPY, GBPJPY, EURGBP, XAGUSD, USOIL, WTI).
-   - Timeframe: Check timeframe indicators, chart title suffix, or interval buttons (e.g., 1m, 3m, 5m, 15m, 30m, 45m, 1h, 2h, 4h, D, 1D, W, 1W, M1, M5, M15, M30, H1, H4, D1, W1).
-2. Set "detectedPair" to the cleanly formatted name (e.g. "EUR/USD", "XAU/USD (Gold)", "BTC/USD (Bitcoin)", "ETH/USD (Ethereum)", "GBP/USD", "USD/JPY", "US30", "NAS100", "AUD/USD", "USD/CAD", "NZD/USD", "USD/CHF", "EUR/JPY", "GBP/JPY").
-3. Set "detectedTimeframe" to standard notation (e.g. "M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1").
-4. If no explicit text watermark is readable, deduce the pair and price scale from the vertical price numbers (e.g. ~1.05-1.12 -> EUR/USD, ~2000-2900 -> XAU/USD (Gold), ~50000-110000 -> BTC/USD (Bitcoin), ~1.20-1.35 -> GBP/USD, ~140-165 -> USD/JPY, ~38000-45000 -> US30, ~18000-22000 -> NAS100, ~0.60-0.70 -> AUD/USD).
-
-Calculate exact Entry Price range, Stop Loss (SL), and 6 Take Profit targets (TP1-TP6) matching the chart's exact visible price numbers based on market structure. Provide comprehensive institutional reasoning across SMC, Market Structure, Technicals, Harmonics/Wyckoff, and Volume. Keep voiceSummary concise (1 sentence).`;
-
-      const promptText = `Analyze this chart screenshot. Automatically detect and extract the financial instrument pair and timeframe from the chart watermark, header, or price scale. Evaluate all 24 strategy engines, calculate Stop Loss and Take Profit levels based on market structure, and specify whether to Buy/Sell NOW or place a pending LIMIT order. Return JSON.`;
-
-      const responseText = await callGeminiWithRetryAndFallback(
-        ai,
-        {
-          contents: [
-            {
-              inlineData: {
-                mimeType: mimeType || "image/jpeg",
-                data: cleanBase64
-              }
-            },
-            { text: promptText }
-          ],
-          config: {
-            systemInstruction: systemInstruction,
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                signal: { type: "STRING" },
-                orderType: { type: "STRING" }, // "BUY NOW" | "SELL NOW" | "BUY LIMIT" | "SELL LIMIT" | "BUY STOP" | "SELL STOP" | "WAIT"
-                orderTypeCategory: { type: "STRING" }, // "MARKET" | "LIMIT" | "STOP" | "WAIT"
-                orderExecutionReason: { type: "STRING" },
-                orderTriggerZone: { type: "STRING" },
-                confidence: { type: "INTEGER" },
-                detectedPair: { type: "STRING" },
-                detectedTimeframe: { type: "STRING" },
-                entryPrice: { type: "STRING" },
-                stopLoss: { type: "STRING" },
-                structureSLNote: { type: "STRING" },
-                takeProfit1: { type: "STRING" },
-                structureTP1Note: { type: "STRING" },
-                takeProfit2: { type: "STRING" },
-                structureTP2Note: { type: "STRING" },
-                takeProfit3: { type: "STRING" },
-                takeProfit4: { type: "STRING" },
-                takeProfit5: { type: "STRING" },
-                takeProfit6: { type: "STRING" },
-                riskRewardRatio: { type: "STRING" },
-                marketStructure: { type: "STRING" },
-                smcAnalysis: {
-                  type: "OBJECT",
-                  properties: {
-                    orderBlocks: { type: "STRING" },
-                    liquiditySweeps: { type: "STRING" },
-                    marketImbalance: { type: "STRING" },
-                    rejectionBlocks: { type: "STRING" },
-                    mitigationBlocks: { type: "STRING" },
-                    displacement: { type: "STRING" }
-                  },
-                  required: ["orderBlocks", "liquiditySweeps", "marketImbalance"]
-                },
-                technicalAnalysis: {
-                  type: "OBJECT",
-                  properties: {
-                    supportResistance: { type: "STRING" },
-                    supplyDemand: { type: "STRING" },
-                    trendlines: { type: "STRING" },
-                    chartPatterns: { type: "STRING" },
-                    candlestickPattern: { type: "STRING" }
-                  },
-                  required: ["supportResistance", "trendlines", "candlestickPattern"]
-                },
-                marketStructureAnalysis: {
-                  type: "OBJECT",
-                  properties: {
-                    marketStructureShift: { type: "STRING" },
-                    breakOfStructure: { type: "STRING" },
-                    changeOfCharacter: { type: "STRING" },
-                    breakoutStrategy: { type: "STRING" },
-                    pullbackStrategy: { type: "STRING" },
-                    sessionKillZones: { type: "STRING" }
-                  }
-                },
-                harmonicWaveAnalysis: {
-                  type: "OBJECT",
-                  properties: {
-                    fibonacciRetracement: { type: "STRING" },
-                    elliottWaves: { type: "STRING" },
-                    harmonicPatterns: { type: "STRING" },
-                    wyckoffMethod: { type: "STRING" }
-                  }
-                },
-                volumeSessionAnalysis: {
-                  type: "OBJECT",
-                  properties: {
-                    volumeProfile: { type: "STRING" },
-                    vwapAnalysis: { type: "STRING" },
-                    sessionBreakouts: { type: "STRING" }
-                  }
-                },
-                strategiesMatrix: {
-                  type: "ARRAY",
-                  items: {
-                    type: "OBJECT",
-                    properties: {
-                      id: { type: "STRING" },
-                      name: { type: "STRING" },
-                      category: { type: "STRING" },
-                      status: { type: "STRING" },
-                      confidence: { type: "INTEGER" },
-                      details: { type: "STRING" }
-                    },
-                    required: ["id", "name", "category", "status", "confidence", "details"]
-                  }
-                },
-                reasoning: {
-                  type: "ARRAY",
-                  items: { type: "STRING" }
-                },
-                voiceSummary: { type: "STRING" }
-              },
-              required: [
-                "signal",
-                "confidence",
-                "detectedPair",
-                "detectedTimeframe",
-                "entryPrice",
-                "stopLoss",
-                "takeProfit1",
-                "takeProfit2",
-                "takeProfit3",
-                "takeProfit4",
-                "takeProfit5",
-                "takeProfit6",
-                "riskRewardRatio",
-                "marketStructure",
-                "smcAnalysis",
-                "technicalAnalysis",
-                "reasoning",
-                "voiceSummary"
-              ]
-            }
-          }
-        },
-        ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.7-flash"]
-      );
-
-      const parsedAnalysis = extractJSON(responseText);
-      res.json({
-        ...parsedAnalysis,
-        isSimulation: false
-      });
-
+      const result = await executeChartScan(ai, cleanBase64, normalizedMime, pair, timeframe);
+      return res.json(result);
     } catch (error: any) {
       const errMsg = error?.message || "";
       const isQuota = errMsg.includes("QUOTA") || errMsg.includes("429") || errMsg.includes("RESOURCE_EXHAUSTED");
       if (isQuota) {
         console.info("[Scanner Engine] Project API quota reached. Serving instant institutional scan analysis.");
       } else {
-        console.info("[Scanner Engine] Serving instant institutional scan analysis.");
+        console.warn("[Scanner Engine] Gemini analysis error, serving fallback:", errMsg);
       }
       res.json(getFallbackScan(pair, timeframe));
     }

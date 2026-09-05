@@ -24,54 +24,228 @@ import { defaultInitialScan } from "./utils/defaultScan";
 import { loadAppSettings, saveAppSettings, loadScansFromStorage, saveScansToStorage, clearScansStorage } from "./utils/storage";
 import { getApiUrl } from "./utils/api";
 
-function normalizeDetectedPair(rawPair?: string, fallback: string = "EUR/USD"): string {
-  if (!rawPair || rawPair === "UNKNOWN" || rawPair === "UNKNOWN_PAIR") return fallback;
-  const cleaned = rawPair.trim().toUpperCase().replace(/[^A-Z0-9/() ]/g, "");
-  
+function normalizeDetectedPair(
+  rawPair?: string,
+  fallback: string = "EUR/USD",
+  entryPriceStr?: string,
+  stopLossStr?: string,
+  otherPrices: Array<string | number | undefined> = []
+): string {
+  if (!rawPair && !entryPriceStr && (!otherPrices || otherPrices.length === 0)) return fallback;
+  const rawTrimmed = (rawPair || "").trim();
+
+  // Extract numeric price levels from all possible fields (handles "$2,685.50", "2685.5", "65,400.00", etc.)
+  const extractNums = (s: any): number[] => {
+    if (!s) return [];
+    if (Array.isArray(s)) return s.flatMap(extractNums);
+    if (typeof s === "number") return [s];
+    if (typeof s !== "string") return [];
+    const sanitized = s.replace(/,/g, "");
+    const m = sanitized.match(/\d+(?:\.\d+)?/g);
+    return m ? m.map(Number).filter(n => !isNaN(n) && n > 0) : [];
+  };
+
+  const prices = [
+    ...extractNums(entryPriceStr),
+    ...extractNums(stopLossStr),
+    ...extractNums(otherPrices)
+  ];
+  const avgP = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : null;
+
+  // Clean rawPair: strip broker suffixes, exchange prefixes (OANDA:, BINANCE:), noise
+  let cleaned = rawTrimmed
+    .toUpperCase()
+    .replace(/^(OANDA|FXCM|BINANCE|COINBASE|BYBIT|INDEX|TVC|FOREXCOM|PEPPERSTONE|ICMARKETS|CAPITALCOM|EIGHTCAP|BITFINEX|KRAKEN|KUCOIN):/i, "")
+    .replace(/\.(RAW|PRO|ECN|R|M|MICRO|MINI|STD|VIP|CASH|A|B|SB)/gi, "")
+    .replace(/[_#+!.-]([A-Z0-9]+)$/gi, "")
+    .replace(/[^A-Z0-9/() _-]/g, "")
+    .trim();
+
+  // Check explicit ticker/keyword patterns with word boundaries and strong indicators
+  const isGoldTicker = /\b(XAU|XAUUSD|XAU_USD|GOLD|SPOTGOLD|GC|XAUUSD[A-Z0-9]*)\b/i.test(cleaned) ||
+                       cleaned.includes("XAU/USD") || cleaned.includes("GOLD");
+  const isBtcTicker = /\b(BTC|BTCUSD|BTC_USD|BITCOIN|XBT|XBTUSD|BTCUSDT)\b/i.test(cleaned) ||
+                      cleaned.includes("BTC/USD") || cleaned.includes("BITCOIN");
+  const isEthTicker = /\b(ETH|ETHUSD|ETH_USD|ETHEREUM|ETHER|ETHUSDT)\b/i.test(cleaned) ||
+                      cleaned.includes("ETH/USD") || cleaned.includes("ETHEREUM");
+
+  // 1. PRICE-SCALE ARBITRATION (Eliminates misclassifications for ambiguous price points)
+  if (avgP !== null) {
+    // Gold price range: $1,800 - $3,800 (e.g. 2650, 2720, 2900). Bitcoin is NEVER in this range!
+    if (avgP >= 1800 && avgP <= 3800) {
+      if (isEthTicker && !isGoldTicker) {
+        return "ETH/USD (Ethereum)";
+      }
+      // If marked as BTC or anything else while price is $1,800-$3,800, resolve to XAU/USD (Gold)
+      return "XAU/USD (Gold)";
+    }
+
+    // Bitcoin price range: $35,000+ (e.g. 60,000, 85,000, 100,000). Gold is NEVER in this range!
+    if (avgP >= 35000) {
+      if (/\b(US30|DOW|DJI|WALLSTREET)\b/i.test(cleaned)) {
+        return "US30 (Dow Jones)";
+      }
+      if (avgP >= 48000 || isBtcTicker) {
+        return "BTC/USD (Bitcoin)";
+      }
+      if (avgP >= 35000 && avgP < 48000) {
+        return "US30 (Dow Jones)";
+      }
+    }
+
+    // Indices scale validation
+    if (avgP >= 15000 && avgP <= 25000) {
+      if (/\b(DAX|GER30|GER40|GERMANY)\b/i.test(cleaned)) return "GER40 (DAX)";
+      return "NAS100 (Nasdaq)";
+    }
+
+    if (avgP >= 4500 && avgP <= 6800) {
+      return "SPX500 (S&P 500)";
+    }
+
+    // JPY Pairs (120 - 225)
+    if (avgP >= 120 && avgP <= 225) {
+      if (cleaned.includes("GBP") && cleaned.includes("JPY")) return "GBP/JPY";
+      if (cleaned.includes("EUR") && cleaned.includes("JPY")) return "EUR/JPY";
+      if (cleaned.includes("AUD") && cleaned.includes("JPY")) return "AUD/JPY";
+      if (cleaned.includes("CAD") && cleaned.includes("JPY")) return "CAD/JPY";
+      if (cleaned.includes("CHF") && cleaned.includes("JPY")) return "CHF/JPY";
+      if (cleaned.includes("NZD") && cleaned.includes("JPY")) return "NZD/JPY";
+      if (cleaned.includes("JPY")) return cleaned.length === 6 ? `${cleaned.slice(0, 3)}/${cleaned.slice(3)}` : "USD/JPY";
+    }
+
+    // Silver ($18 - $45)
+    if (avgP >= 18 && avgP <= 45) {
+      return "XAG/USD (Silver)";
+    }
+
+    // Crude Oil ($50 - $115)
+    if (avgP >= 50 && avgP <= 115) {
+      return "USOIL (WTI Crude)";
+    }
+
+    // Forex Majors & Minors (0.50 - 1.80)
+    if (avgP >= 0.50 && avgP <= 1.80) {
+      if (cleaned.includes("EUR") && cleaned.includes("USD")) return "EUR/USD";
+      if (cleaned.includes("GBP") && cleaned.includes("USD")) return "GBP/USD";
+      if (cleaned.includes("AUD") && cleaned.includes("USD")) return "AUD/USD";
+      if (cleaned.includes("USD") && cleaned.includes("CAD")) return "USD/CAD";
+      if (cleaned.includes("USD") && cleaned.includes("CHF")) return "USD/CHF";
+      if (cleaned.includes("NZD") && cleaned.includes("USD")) return "NZD/USD";
+      if (cleaned.includes("EUR") && cleaned.includes("GBP")) return "EUR/GBP";
+      if (cleaned.includes("EUR") && cleaned.includes("AUD")) return "EUR/AUD";
+      if (cleaned.includes("GBP") && cleaned.includes("AUD")) return "GBP/AUD";
+    }
+  }
+
+  // 2. Keyword & Symbol Rules (when price is unavailable or outside standard brackets)
+  if (isGoldTicker) return "XAU/USD (Gold)";
+  if (isEthTicker) return "ETH/USD (Ethereum)";
+  if (isBtcTicker && (avgP === null || avgP >= 35000)) return "BTC/USD (Bitcoin)";
+  if (/\b(SOL|SOLUSD|SOLANA)\b/i.test(cleaned)) return "SOL/USD (Solana)";
+  if (/\b(XRP|RIPPLE)\b/i.test(cleaned)) return "XRP/USD (Ripple)";
+  if (/\b(DOGE|DOGEUSD)\b/i.test(cleaned)) return "DOGE/USD";
+  if (/\b(BNB|BNBUSD)\b/i.test(cleaned)) return "BNB/USD";
+  if (/\b(ADA|CARDANO)\b/i.test(cleaned)) return "ADA/USD";
+
+  // Commodities & Metals
+  if (cleaned.includes("XAG") || cleaned.includes("SILVER")) return "XAG/USD (Silver)";
+  if (cleaned.includes("USOIL") || cleaned.includes("WTI") || cleaned.includes("CRUDE")) return "USOIL (WTI Crude)";
+  if (cleaned.includes("UKOIL") || cleaned.includes("BRENT")) return "UKOIL (Brent Crude)";
+
+  // Indices
+  if (cleaned.includes("US30") || cleaned.includes("DOW") || cleaned.includes("DJI") || cleaned.includes("WALLSTREET")) return "US30 (Dow Jones)";
+  if (cleaned.includes("NAS100") || cleaned.includes("NASDAQ") || cleaned.includes("NDX") || cleaned.includes("USTEC") || cleaned.includes("US100")) return "NAS100 (Nasdaq)";
+  if (cleaned.includes("SPX500") || cleaned.includes("US500") || cleaned.includes("SP500") || cleaned.includes("S&P")) return "SPX500 (S&P 500)";
+  if (cleaned.includes("GER30") || cleaned.includes("GER40") || cleaned.includes("DAX")) return "GER40 (DAX)";
+  if (cleaned.includes("UK100") || cleaned.includes("FTSE")) return "UK100 (FTSE 100)";
+  if (cleaned.includes("JP225") || cleaned.includes("NIKKEI")) return "JP225 (Nikkei 225)";
+  if (cleaned.includes("US2000") || cleaned.includes("RUSSELL")) return "US2000 (Russell 2000)";
+
+  // Major Forex Pairs
   if (cleaned.includes("EUR") && cleaned.includes("USD")) return "EUR/USD";
   if (cleaned.includes("GBP") && cleaned.includes("USD")) return "GBP/USD";
   if (cleaned.includes("USD") && cleaned.includes("JPY")) return "USD/JPY";
-  if (cleaned.includes("EUR") && cleaned.includes("JPY")) return "EUR/JPY";
-  if (cleaned.includes("GBP") && cleaned.includes("JPY")) return "GBP/JPY";
-  if (cleaned.includes("EUR") && cleaned.includes("GBP")) return "EUR/GBP";
   if (cleaned.includes("AUD") && cleaned.includes("USD")) return "AUD/USD";
   if (cleaned.includes("USD") && cleaned.includes("CAD")) return "USD/CAD";
   if (cleaned.includes("USD") && cleaned.includes("CHF")) return "USD/CHF";
   if (cleaned.includes("NZD") && cleaned.includes("USD")) return "NZD/USD";
-  if (cleaned.includes("XAU") || cleaned.includes("GOLD")) return "XAU/USD (Gold)";
-  if (cleaned.includes("XAG") || cleaned.includes("SILVER")) return "XAG/USD (Silver)";
-  if (cleaned.includes("BTC") || cleaned.includes("BITCOIN")) return "BTC/USD (Bitcoin)";
-  if (cleaned.includes("ETH") || cleaned.includes("ETHEREUM")) return "ETH/USD (Ethereum)";
-  if (cleaned.includes("SOL") || cleaned.includes("SOLANA")) return "SOL/USD (Solana)";
-  if (cleaned.includes("US30") || cleaned.includes("DOW") || cleaned.includes("DJI")) return "US30 (Dow Jones)";
-  if (cleaned.includes("NAS100") || cleaned.includes("NASDAQ") || cleaned.includes("NDX") || cleaned.includes("USTEC")) return "NAS100 (Nasdaq)";
-  if (cleaned.includes("SPX500") || cleaned.includes("US500") || cleaned.includes("S&P")) return "SPX500 (S&P 500)";
-  if (cleaned.includes("GER30") || cleaned.includes("GER40") || cleaned.includes("DAX")) return "GER40 (DAX)";
-  if (cleaned.includes("OIL") || cleaned.includes("USOIL") || cleaned.includes("WTI")) return "USOIL (WTI Crude)";
-  
-  if (cleaned.length === 6 && !cleaned.includes("/")) {
-    return `${cleaned.substring(0, 3)}/${cleaned.substring(3)}`;
+
+  // Crosses
+  if (cleaned.includes("EUR") && cleaned.includes("JPY")) return "EUR/JPY";
+  if (cleaned.includes("GBP") && cleaned.includes("JPY")) return "GBP/JPY";
+  if (cleaned.includes("EUR") && cleaned.includes("GBP")) return "EUR/GBP";
+  if (cleaned.includes("AUD") && cleaned.includes("JPY")) return "AUD/JPY";
+  if (cleaned.includes("CAD") && cleaned.includes("JPY")) return "CAD/JPY";
+  if (cleaned.includes("CHF") && cleaned.includes("JPY")) return "CHF/JPY";
+  if (cleaned.includes("NZD") && cleaned.includes("JPY")) return "NZD/JPY";
+  if (cleaned.includes("EUR") && cleaned.includes("AUD")) return "EUR/AUD";
+  if (cleaned.includes("GBP") && cleaned.includes("AUD")) return "GBP/AUD";
+  if (cleaned.includes("EUR") && cleaned.includes("CAD")) return "EUR/CAD";
+  if (cleaned.includes("GBP") && cleaned.includes("CAD")) return "GBP/CAD";
+  if (cleaned.includes("AUD") && cleaned.includes("CAD")) return "AUD/CAD";
+  if (cleaned.includes("AUD") && cleaned.includes("NZD")) return "AUD/NZD";
+  if (cleaned.includes("EUR") && cleaned.includes("CHF")) return "EUR/CHF";
+  if (cleaned.includes("GBP") && cleaned.includes("CHF")) return "GBP/CHF";
+  if (cleaned.includes("EUR") && cleaned.includes("NZD")) return "EUR/NZD";
+  if (cleaned.includes("GBP") && cleaned.includes("NZD")) return "GBP/NZD";
+  if (cleaned.includes("CAD") && cleaned.includes("CHF")) return "CAD/CHF";
+  if (cleaned.includes("NZD") && cleaned.includes("CAD")) return "NZD/CAD";
+  if (cleaned.includes("NZD") && cleaned.includes("CHF")) return "NZD/CHF";
+
+  // Exotics
+  if (cleaned.includes("USD") && cleaned.includes("ZAR")) return "USD/ZAR";
+  if (cleaned.includes("USD") && cleaned.includes("MXN")) return "USD/MXN";
+  if (cleaned.includes("USD") && cleaned.includes("TRY")) return "USD/TRY";
+  if (cleaned.includes("USD") && cleaned.includes("SGD")) return "USD/SGD";
+
+  // Standard 6-letter notation (e.g. EURUSD -> EUR/USD)
+  const lettersOnly = cleaned.replace(/[^A-Z]/g, "");
+  if (lettersOnly.length === 6 && !cleaned.includes("/")) {
+    return `${lettersOnly.substring(0, 3)}/${lettersOnly.substring(3)}`;
   }
-  return rawPair.trim();
+
+  if (
+    cleaned.length >= 3 &&
+    !cleaned.includes("UNKNOWN") &&
+    !cleaned.includes("NULL") &&
+    !cleaned.includes("N/A") &&
+    !cleaned.includes("NOT_DETECTED")
+  ) {
+    return cleaned;
+  }
+
+  return fallback;
 }
 
 function normalizeDetectedTimeframe(rawTf?: string, fallback: string = "H1"): string {
-  if (!rawTf || rawTf === "UNKNOWN" || rawTf === "UNKNOWN_TIMEFRAME") return fallback;
-  const cleaned = rawTf.trim().toUpperCase();
-  if (cleaned === "1M" || cleaned === "M1" || cleaned === "1 MIN") return "M1";
-  if (cleaned === "3M" || cleaned === "M3" || cleaned === "3 MIN") return "M3";
-  if (cleaned === "5M" || cleaned === "M5" || cleaned === "5 MIN") return "M5";
-  if (cleaned === "15M" || cleaned === "M15" || cleaned === "15 MIN") return "M15";
-  if (cleaned === "30M" || cleaned === "M30" || cleaned === "30 MIN") return "M30";
-  if (cleaned === "45M" || cleaned === "M45" || cleaned === "45 MIN") return "M45";
-  if (cleaned === "1H" || cleaned === "H1" || cleaned === "60M" || cleaned === "60" || cleaned === "1 HOUR") return "H1";
-  if (cleaned === "2H" || cleaned === "H2" || cleaned === "120M" || cleaned === "120" || cleaned === "2 HOUR") return "H2";
-  if (cleaned === "3H" || cleaned === "H3" || cleaned === "180M" || cleaned === "180" || cleaned === "3 HOUR") return "H3";
-  if (cleaned === "4H" || cleaned === "H4" || cleaned === "240M" || cleaned === "240" || cleaned === "4 HOUR") return "H4";
-  if (cleaned === "1D" || cleaned === "D1" || cleaned === "D" || cleaned === "DAILY" || cleaned === "1 DAY") return "D1";
-  if (cleaned === "1W" || cleaned === "W1" || cleaned === "W" || cleaned === "WEEKLY" || cleaned === "1 WEEK") return "W1";
-  if (cleaned === "1MO" || cleaned === "MN" || cleaned === "MONTHLY" || cleaned === "1 MONTH") return "MN";
-  return cleaned;
+  if (!rawTf) return fallback;
+  const cleaned = rawTf.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (
+    cleaned === "UNKNOWN" ||
+    cleaned === "UNKNOWN_TIMEFRAME" ||
+    cleaned === "NA" ||
+    cleaned === "NONE" ||
+    cleaned === "NULL" ||
+    cleaned === ""
+  ) {
+    return fallback;
+  }
+
+  if (cleaned === "1M" || cleaned === "M1" || cleaned === "1MIN" || cleaned === "1MINUTE") return "M1";
+  if (cleaned === "3M" || cleaned === "M3" || cleaned === "3MIN" || cleaned === "3MINUTE") return "M3";
+  if (cleaned === "5M" || cleaned === "M5" || cleaned === "5MIN" || cleaned === "5MINUTE") return "M5";
+  if (cleaned === "15M" || cleaned === "M15" || cleaned === "15MIN" || cleaned === "15MINUTE") return "M15";
+  if (cleaned === "30M" || cleaned === "M30" || cleaned === "30MIN" || cleaned === "30MINUTE") return "M30";
+  if (cleaned === "45M" || cleaned === "M45" || cleaned === "45MIN" || cleaned === "45MINUTE") return "M45";
+  if (cleaned === "1H" || cleaned === "H1" || cleaned === "60M" || cleaned === "60" || cleaned === "1HOUR" || cleaned === "60MIN") return "H1";
+  if (cleaned === "2H" || cleaned === "H2" || cleaned === "120M" || cleaned === "120" || cleaned === "2HOUR" || cleaned === "120MIN") return "H2";
+  if (cleaned === "3H" || cleaned === "H3" || cleaned === "180M" || cleaned === "180" || cleaned === "3HOUR" || cleaned === "180MIN") return "H3";
+  if (cleaned === "4H" || cleaned === "H4" || cleaned === "240M" || cleaned === "240" || cleaned === "4HOUR" || cleaned === "240MIN") return "H4";
+  if (cleaned === "1D" || cleaned === "D1" || cleaned === "D" || cleaned === "DAILY" || cleaned === "1DAY") return "D1";
+  if (cleaned === "1W" || cleaned === "W1" || cleaned === "W" || cleaned === "WEEKLY" || cleaned === "1WEEK") return "W1";
+  if (cleaned === "1MO" || cleaned === "MN" || cleaned === "MONTHLY" || cleaned === "1MONTH" || cleaned === "M") return "MN";
+  return cleaned.length <= 4 ? cleaned : fallback;
 }
 
 export default function App() {
@@ -142,14 +316,22 @@ export default function App() {
   const handleScanChart = async (image: string, mimeType: string, defaultPair: string, defaultTf: string) => {
     setIsScanning(true);
     shadsAudio.playScanBeep(440);
+    console.log(`[Shads AI Frontend] 📡 Dispatching fresh chart scan request | Image payload: ${(image.length / 1024).toFixed(1)} KB chars | MIME: ${mimeType}`);
 
     try {
       const response = await fetch(getApiUrl("/api/scan"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache"
+        },
+        cache: "no-store",
         body: JSON.stringify({
           image,
           mimeType,
+          recognizedPair: defaultPair,
+          recognizedTimeframe: defaultTf,
           selectedPair: defaultPair,
           selectedTimeframe: defaultTf
         }),
@@ -160,9 +342,33 @@ export default function App() {
       }
 
       const rawResult = await response.json();
+      console.log("[Shads AI Frontend] ✅ Scan response received:", {
+        pair: rawResult.detectedPair || rawResult.pair,
+        timeframe: rawResult.detectedTimeframe || rawResult.timeframe,
+        signal: rawResult.signal,
+        orderType: rawResult.orderType,
+        isSimulation: rawResult.isSimulation
+      });
       
-      const recognizedPair = normalizeDetectedPair(rawResult.detectedPair || rawResult.pair, defaultPair);
+      const recognizedPair = normalizeDetectedPair(
+        rawResult.detectedPair || rawResult.pair,
+        defaultPair,
+        rawResult.entryPrice,
+        rawResult.stopLoss,
+        [
+          rawResult.takeProfit1,
+          rawResult.takeProfit2,
+          rawResult.takeProfit3,
+          rawResult.takeProfit4,
+          rawResult.takeProfit5,
+          rawResult.takeProfit6
+        ]
+      );
       const recognizedTimeframe = normalizeDetectedTimeframe(rawResult.detectedTimeframe || rawResult.timeframe, defaultTf);
+
+      // Auto-update global pair and timeframe state to match detected chart screenshot
+      setSelectedPair(recognizedPair);
+      setSelectedTimeframe(recognizedTimeframe);
 
       const parsedResult: ScanResult = {
         ...rawResult,
